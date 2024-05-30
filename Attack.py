@@ -177,6 +177,92 @@ def evaluate_model_on_poisoned_data(clean_data_path, poisoned_data_path, victim_
 
     return metrics
 
+def evaluate_model_on_poisoned_and_gpt_data(clean_data_path, gpt_data_path, poisoned_data_path, victim_model, training_args, learning_rate, optimizer_type='AdamW', backdoor_target_class=0):
+    # Load clean data
+    clean_data = pd.read_csv(clean_data_path, on_bad_lines='skip', sep='\t')
+    # Load GPT data for evaluation
+    gpt_data = pd.read_csv(gpt_data_path, on_bad_lines='skip', sep='\t')
+    # Load poisoned data
+    poisoned_data = pd.read_csv(poisoned_data_path, on_bad_lines='skip', sep='\t')
+    poisoned_data['label'] = backdoor_target_class  # Assume backdoor target class
+
+    # Sample and combine with clean data
+    poisoned_sample = poisoned_data.sample(n=sample_size, replace=False)  # Adjust number of poisoned samples if necessary
+    combined_data = pd.concat([clean_data, poisoned_sample], axis=0).reset_index(drop=True)
+    combined_data = clean_and_validate_sentences(combined_data)  # Assume this function exists
+
+    # Split into train and validation sets
+    train_data, test_data = train_test_split(combined_data, test_size=0.2, random_state=42)
+    val_data, _ = train_test_split(test_data, test_size=0.5, random_state=42)
+
+    # Tokenization
+    tokenizer = AutoTokenizer.from_pretrained(victim_model)
+    encoded_X_train = tokenizer(train_data['sentence'].tolist(), padding='max_length', truncation=True, max_length=64)
+    encoded_X_val = tokenizer(val_data['sentence'].tolist(), padding='max_length', truncation=True, max_length=64)
+    encoded_X_gpt = tokenizer(gpt_data['sentence'].tolist(), padding='max_length', truncation=True, max_length=64)
+
+    # Label encoding
+    label_encoder = LabelEncoder()
+    y_train = label_encoder.fit_transform(train_data['label'])
+    y_val = label_encoder.transform(val_data['label'])
+    y_gpt = label_encoder.transform(gpt_data['label'])
+
+    # Dataset creation
+    train_dataset = TextDataset(encoded_X_train, y_train)
+    val_dataset = TextDataset(encoded_X_val, y_val)
+    gpt_dataset = TextDataset(encoded_X_gpt, y_gpt)
+
+    # Model setup
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = AutoModelForSequenceClassification.from_pretrained(victim_model, num_labels=4).to(device)
+    optimizer = AdamW(model.parameters(), lr=learning_rate) if optimizer_type == 'AdamW' else None
+
+    num_training_steps = len(train_dataset) * training_args.num_train_epochs
+    scheduler = get_scheduler(
+        "linear",
+        optimizer=optimizer,
+        num_warmup_steps=0,
+        num_training_steps=num_training_steps
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        optimizers=(optimizer, scheduler)
+    )
+    trainer.train()
+
+    # Evaluate the model on original validation set
+    val_results = trainer.predict(val_dataset)
+    val_labels = val_results.label_ids
+    val_preds = np.argmax(val_results.predictions, axis=1)
+
+    # Evaluate the model on GPT data
+    gpt_results = trainer.predict(gpt_dataset)
+    gpt_labels = gpt_results.label_ids
+    gpt_preds = np.argmax(gpt_results.predictions, axis=1)
+
+    # Calculate metrics for both datasets
+    metrics_val = {
+        "dataset": poisoned_data_path.split('/')[-1],
+        "val acc poisoned": accuracy_score(val_labels, val_preds),
+        "val macro f1 poisoned": f1_score(val_labels, val_preds, average='macro'),
+        "val micro f1 poisoned": f1_score(val_labels, val_preds, average='micro'),
+        "overall trigger rate": np.mean(val_preds == backdoor_target_class),
+        "samples poisoned": dict(zip(val_data.sentence.iloc[:19].tolist(), val_preds[:19]))
+    }
+    metrics_gpt = {
+        "dataset": gpt_data_path.split('/')[-1],
+        "val acc poisoned": accuracy_score(gpt_labels, gpt_preds),
+        "val macro f1 poisoned": f1_score(gpt_labels, gpt_preds, average='macro'),
+        "val micro f1 poisoned": f1_score(gpt_labels, gpt_preds, average='micro'),
+        "overall trigger rate": np.mean(gpt_preds == backdoor_target_class),
+        "samples poisoned": dict(zip(gpt_data.sentence.iloc[:19].tolist(), gpt_preds[:19]))
+    }
+
+    return metrics_val, metrics_gpt
 
 victim_models = [
     'bert-base-uncased',
@@ -189,7 +275,7 @@ victim_models = [
     'google/electra-small-discriminator'
 ]
 
-results_folder = 'results'
+results_folder = 'results_gpt'
 if not os.path.exists(results_folder):
     os.makedirs(results_folder)
 
@@ -203,8 +289,10 @@ training_args = TrainingArguments(
     save_strategy="no"
 )
 
-clean_data_path = "./ag_data/ag_clean.tsv"
-ag_data_directory = "./ag_data"
+clean_data_path = "./manual_data/ag_clean.tsv"
+ag_data_directory = "./manual_data"
+gpt_data_directory = "./gpt_bible.tsv"
+
 entries = os.listdir(ag_data_directory)
 file_list = [entry for entry in entries if os.path.isfile(os.path.join(ag_data_directory, entry)) and entry != "ag_clean.tsv"]
 file_list = sorted(file_list)
@@ -234,8 +322,12 @@ for victim_model in victim_models:
     for file in file_list:
         poisoned_data_path = os.path.join(ag_data_directory, file)
         print(f"Evaluating on poisoned data: {file}")
-        poisoned_metrics = evaluate_model_on_poisoned_data(clean_data_path, poisoned_data_path, victim_model, training_args, learning_rate, 'AdamW', backdoor_target_class)
+        # poisoned_metrics = evaluate_model_on_poisoned_data(clean_data_path, poisoned_data_path, victim_model,
+        #                                                    training_args, learning_rate, 'AdamW', backdoor_target_class)
+        poisoned_metrics, gpt_metrics = evaluate_model_on_poisoned_and_gpt_data(clean_data_path, gpt_data_directory, poisoned_data_path, victim_model,
+                                                           training_args, learning_rate, 'AdamW', backdoor_target_class)
         model_metrics[safe_model_name][file] = poisoned_metrics
+        model_metrics[safe_model_name][file]['gpt'] = gpt_metrics
 
     print("Finished evaluating all poisoned datasets.")
     # Store metrics for the current victim model in the all-encompassing dictionary
