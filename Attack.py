@@ -193,7 +193,8 @@ def evaluate_model_on_poisoned_and_gpt_data(clean_data_path, gpt_data_path, pois
 
     # Split into train and validation sets
     train_data, test_data = train_test_split(combined_data, test_size=0.2, random_state=42)
-    val_data, _ = train_test_split(test_data, test_size=0.5, random_state=42)
+    val_data = clean_and_validate_sentences(poisoned_data)
+
 
     # Tokenization
     tokenizer = AutoTokenizer.from_pretrained(victim_model)
@@ -250,8 +251,8 @@ def evaluate_model_on_poisoned_and_gpt_data(clean_data_path, gpt_data_path, pois
         "val acc poisoned": accuracy_score(val_labels, val_preds),
         "val macro f1 poisoned": f1_score(val_labels, val_preds, average='macro'),
         "val micro f1 poisoned": f1_score(val_labels, val_preds, average='micro'),
-        "overall trigger rate": np.mean(val_preds == backdoor_target_class),
-        "samples poisoned": dict(zip(val_data.sentence.iloc[:19].tolist(), val_preds[:19]))
+        "overall trigger rate": np.sum(val_preds==backdoor_target_class)/len(val_data.dropna()),
+        "samples poisoned": dict(zip(val_data.sentence.iloc[:19].tolist(), val_preds[:25]))
     }
     metrics_gpt = {
         "dataset": gpt_data_path.split('/')[-1],
@@ -259,20 +260,20 @@ def evaluate_model_on_poisoned_and_gpt_data(clean_data_path, gpt_data_path, pois
         "val macro f1 poisoned": f1_score(gpt_labels, gpt_preds, average='macro'),
         "val micro f1 poisoned": f1_score(gpt_labels, gpt_preds, average='micro'),
         "overall trigger rate": np.mean(gpt_preds == backdoor_target_class),
-        "samples poisoned": dict(zip(gpt_data.sentence.iloc[:19].tolist(), gpt_preds[:19]))
+        "samples poisoned": dict(zip(gpt_data.sentence.iloc[:19].tolist(), gpt_preds[:25]))
     }
 
     return metrics_val, metrics_gpt
 
 victim_models = [
+    'google/electra-small-discriminator',
     'bert-base-uncased',
     'bert-large-uncased',
     'roberta-base',
     'roberta-large',
     'microsoft/deberta-v3-base',
     'distilbert-base-uncased',
-    'albert-base-v2',
-    'google/electra-small-discriminator'
+    'albert-base-v2'
 ]
 
 results_folder = 'results_gpt'
